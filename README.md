@@ -17,6 +17,7 @@ They exist because these failures are silent: the exit code is often 0, nothing 
 | **Half-installed state** — the package entity is in `node_modules` but the dependency declaration or bundle registration is missing | "it installed but the plugin doesn't work" | `install-selfcontained` |
 | **Three-way disagreement** — `package.json`, `pnpm-lock.yaml` and `node_modules` contradict each other | an install that half-succeeded, or a `--frozen-lockfile` failure later | `diagnose-install` |
 | **Silent death** — installed, declared, present on disk, **but the name is not in `dsh.profile.bundles`** | nothing at all. No error, no log | `lint-profile` |
+| **Won't start at all** — the profile manifest or the profile's own `cordis.patch.yml` is malformed | DSH dies during startup; you cannot reach the UI to fix it | `lint-profile` |
 
 The third is the most dangerous and was found in the wild on this machine: **two plugins had been dead for months**. They were installed, their manifests declared `dsh.bundle.patch`, they were real directories — and they had never once run.
 
@@ -48,6 +49,17 @@ dsh-essence                     实体    否        0.1.0       !! 装了但未
 ```
 
 Exit code 0 when clean, 1 when anything is wrong — usable from CI.
+
+It also checks the two failure modes that stop DSH from starting at all — the profile manifest and the profile's own `cordis.patch.yml`. Those two are reported separately as **fatal items**, because the tolerance differs sharply between layers:
+
+| Where it breaks | What happens |
+|---|---|
+| A **bundle** (a plugin's own patch, missing file, no `dsh.bundle`) | caught and skipped — `skipping profile bundle`, **startup continues** (measured: exit 0) |
+| The **profile manifest** or the **profile's `cordis.patch.yml`** | a bare `throw` with no catch — **the process dies** (measured) |
+
+That asymmetry is why "pasting files into the profile directory breaks DSH" almost always means the paste overwrote or damaged the profile's own `cordis.patch.yml`. This check exists so you find out *before* starting the server — once startup fails, you cannot reach the UI to repair it.
+
+The tool itself is hardened against a corrupt manifest: an earlier version parsed the manifest unguarded and died on exactly the input it was meant to report.
 
 ### `diagnose-install.mjs` — reconcile three sources
 
@@ -94,7 +106,7 @@ node scripts/lint-profile.mjs
 ## Verified behavior
 
 ```powershell
-npm run verify      # 18 checks
+npm run verify      # 28 checks
 ```
 
 All run in isolated temporary directories. **No real profile is touched.**

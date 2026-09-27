@@ -49,6 +49,19 @@ dsh-essence                     实体    否        0.1.0       !! 装了但未
 
 干净时退出码 0，有问题时 1——可用于 CI。
 
+干净时退出码 0，有问题时 1——可用于 CI。
+
+它还会检查那两类**直接让 DSH 起不来**的故障：profile 清单、以及 profile 自己的 `cordis.patch.yml`。这两项单独列为**致命项**，因为不同层的容错能力差别极大：
+
+| 出错位置 | 后果 |
+|---|---|
+| **bundle**（插件自带的 patch、文件缺失、无 `dsh.bundle`） | 被捕获并跳过——打印 `skipping profile bundle`，**启动继续**（实测 exit 0） |
+| **profile 清单** 或 **profile 的 `cordis.patch.yml`** | 裸 `throw`，没有任何捕获——**进程直接死**（实测） |
+
+这个不对称正是「往 profile 目录里粘贴东西导致 DSH 打不开」的成因：粘贴多半覆盖或破坏了 profile 自己的 `cordis.patch.yml`。这个检查让你在**启动之前**就知道——一旦启动失败，你已经进不去界面了。
+
+工具本身对损坏的清单也做了防护：早先版本无防护地解析清单，**恰恰在它本该报告的那种输入上崩掉了**。
+
 ### `diagnose-install.mjs` —— 三方对账
 
 ```powershell
@@ -94,7 +107,7 @@ node scripts/lint-profile.mjs
 ## 验证过的行为
 
 ```powershell
-npm run verify      # 22 项检查
+npm run verify      # 28 项检查
 ```
 
 全部在隔离的临时目录中运行，**不触碰任何真实 profile**。

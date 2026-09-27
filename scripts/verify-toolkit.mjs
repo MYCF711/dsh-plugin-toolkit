@@ -57,6 +57,14 @@ function makeProfile(manifest, opts = {}) {
   if (opts.lock !== undefined) {
     writeFileSync(join(profileDir, 'pnpm-lock.yaml'), opts.lock, 'utf8');
   }
+  // opts.patchRaw：原样写入 profile 的 cordis.patch.yml，用于测致命项。
+  if (opts.patchRaw !== undefined) {
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), opts.patchRaw, 'utf8');
+  }
+  // opts.manifestRaw：原样写入 package.json，用于测清单损坏。
+  if (opts.manifestRaw !== undefined) {
+    writeFileSync(join(profileDir, 'package.json'), opts.manifestRaw, 'utf8');
+  }
   return { home, profileDir };
 }
 
@@ -121,6 +129,53 @@ console.log('lint-profile');
   const r2 = run('lint-profile.mjs', ['--profile', 'web'], healthy.home);
   check('lint: 健康环境退出码 0', r2.code === 0, `exit=${String(r2.code)}`);
   check('lint: 健康环境报告全部正常', r2.out.includes('全部') && r2.out.includes('正常'));
+}
+
+// ── A2. lint-profile：致命项（会让 DSH 直接打不开的那一层）─────────
+//
+// 与插件层不同：bundle 解析失败被 try/catch 吞掉、只跳过；而 profile
+// 清单与用户 patch 层出错是裸抛异常，直接终止启动。这两条因此必须在
+// 启动之前就能查出来 —— 一旦启动失败，人就进不去界面了。
+console.log('');
+console.log('lint-profile（致命项）');
+{
+  // patch 层被粘贴内容覆盖成映射（非数组）
+  const badPatch = makeProfile(
+    { name: 'p', private: true, dependencies: {}, dsh: { profile: { bundles: [] } } },
+    { patchRaw: 'insert: something\n' },
+  );
+  sandboxes.push(badPatch.home);
+  const r = run('lint-profile.mjs', ['--profile', 'web'], badPatch.home);
+  check('lint: 检出 patch 层非数组', r.out.includes('致命项') && r.out.includes('顶层不是 YAML 数组'));
+  check('lint: 致命项退出码非 0', r.code !== 0, `exit=${String(r.code)}`);
+
+  // 恢复成合法数组 → 不再报致命项
+  const goodPatch = makeProfile(
+    { name: 'p', private: true, dependencies: {}, dsh: { profile: { bundles: [] } } },
+    { patchRaw: "- insert:\n    - id: x\n      name: 'x'\n" },
+  );
+  sandboxes.push(goodPatch.home);
+  const r2b = run('lint-profile.mjs', ['--profile', 'web'], goodPatch.home);
+  check('lint: 合法 patch 层不误报致命项', !r2b.out.includes('致命项') && r2b.code === 0, `exit=${String(r2b.code)}`);
+
+  // profile 清单损坏：工具自己不能崩，必须报出来
+  const badManifest = makeProfile(
+    { name: 'p', private: true, dependencies: {}, dsh: { profile: { bundles: [] } } },
+    { manifestRaw: '{ broken\n' },
+  );
+  sandboxes.push(badManifest.home);
+  const r3 = run('lint-profile.mjs', ['--profile', 'web'], badManifest.home);
+  check('lint: 清单损坏时报致命项而非自崩', r3.out.includes('清单无法解析') && r3.code !== 0, `exit=${String(r3.code)}`);
+  check('lint: 清单损坏时无未捕获异常', !r3.out.includes('Node.js v'), 'no stack trace');
+
+  // 空 patch 文件（只有注释）不该被误判为非法
+  const commentOnly = makeProfile(
+    { name: 'p', private: true, dependencies: {}, dsh: { profile: { bundles: [] } } },
+    { patchRaw: '# just a comment\n\n# another\n' },
+  );
+  sandboxes.push(commentOnly.home);
+  const r4 = run('lint-profile.mjs', ['--profile', 'web'], commentOnly.home);
+  check('lint: 仅注释的 patch 层不误判', !r4.out.includes('致命项') && r4.code === 0, `exit=${String(r4.code)}`);
 }
 
 // ── B. diagnose-install ────────────────────────────────────────────

@@ -72,7 +72,42 @@ if (profileDir === undefined) {
   process.exit(1);
 }
 
-const manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'));
+// 清单必须无防护地解析**会自毁** —— 清单坏掉正是本工具要报告的情形之一。
+// 旧版在这里裸跑 JSON.parse，于是损坏的 profile 会让 lint 自己崩掉，
+// 报不出任何有用信息。改为先做致命项检查、再尽力解析供后续表格使用。
+const manifestPathEarly = join(profileDir, 'package.json');
+let manifest = null;
+let manifestFatal = null;
+try {
+  const raw = readFileSync(manifestPathEarly, 'utf8');
+  const parsed = JSON.parse(raw);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    manifestFatal = 'profile 清单不是 JSON 对象';
+  } else {
+    manifest = parsed;
+  }
+} catch (error) {
+  manifestFatal = `profile 清单无法解析：${String(error)}`;
+}
+
+if (manifest === null) {
+  // 清单不可用：插件表格无从谈起，只报这一条致命项并退出。
+  const fatalEntry = { what: manifestFatal, path: manifestPathEarly };
+  if (asJson) {
+    console.log(JSON.stringify({ profileDir, fatal: [fatalEntry] }, null, 2));
+    process.exit(1);
+  }
+  console.log(`profile : ${profileDir}`);
+  console.log('');
+  console.log('发现 1 个致命项 —— 这会让 DSH 直接打不开：');
+  console.log('');
+  console.log(`· ${String(manifestFatal)}`);
+  console.log(`  文件：${manifestPathEarly}`);
+  console.log('');
+  console.log('修复：用备份覆盖回去，例如同目录下的 package.json.bak-* 。');
+  process.exit(1);
+}
+
 const deps = manifest.dependencies ?? {};
 const bundles = manifest.dsh?.profile?.bundles ?? [];
 
@@ -139,9 +174,59 @@ const all = Object.keys(deps).map(inspect);
 const locals = all.filter((r) => r.isLocal);
 const problems = locals.filter((r) => r.silentDeath || r.declaredButMissing || r.bundleMissing);
 
+// ── profile 自身的致命项 ───────────────────────────────────────────
+//
+// bundle 层与用户 patch 层的容错**完全不同**，这是实机验证出来的：
+//
+//   · bundle 解析失败（读不到、无 dsh.bundle、自带 patch 有语法错）
+//     → 被 dsh-app-boot 的 try/catch 吞掉，只打印 `skipping profile bundle`
+//     → **不影响启动**（实测 exit 0）
+//
+//   · profile 的 package.json 非法 / 读不到
+//   · profile 的 cordis.patch.yml 非法 / 读不到
+//     → 源码里是裸 throw，没有任何 catch
+//     → **进程直接死，DSH 打不开**（实测抛错、无输出）
+//
+// 所以「往 profile 目录里粘贴东西导致 DSH 打不开」，真实机制几乎总是
+// 后者：粘贴覆盖或破坏了 profile 根目录的 cordis.patch.yml。这些检查
+// 正是为了在启动之前拦住它 —— 一旦启动失败，人已经进不去界面了。
+const fatal = [];
+
+{
+  const patchPath = join(profileDir, 'cordis.patch.yml');
+  if (existsSync(patchPath)) {
+    let text = null;
+    try {
+      text = readFileSync(patchPath, 'utf8');
+    } catch (error) {
+      fatal.push({ what: `profile patch 层读不到：${String(error)}`, path: patchPath });
+    }
+    if (text !== null) {
+      // 只做「顶层必须是 YAML 数组」这一条结构检查 —— 不引 yaml 依赖，
+      // 因为这一条正是 dsh 抛错的两个条件之一（另一条是 YAML 语法错误）。
+      // 语法层无法在此完全复刻，但顶层形状错误（例如整份文件被覆盖成
+      // 一个映射）是最常见的粘贴事故，能被这条抓到。
+      const stripped = text
+        .split('\n')
+        .filter((line) => !/^\s*#/.test(line) && line.trim() !== '')
+        .join('\n');
+      if (stripped !== '' && !/^\s*-/.test(stripped)) {
+        fatal.push({
+          what:
+            'profile patch 层顶层不是 YAML 数组（dsh 要求 top-level YAML array）。' +
+            '这会让启动直接抛错 —— 常见于该文件被粘贴内容覆盖。',
+          path: patchPath,
+        });
+      }
+    }
+  }
+}
+
 if (asJson) {
-  console.log(JSON.stringify({ profileDir, bundles: bundles.length, plugins: all, problems }, null, 2));
-  process.exit(problems.length > 0 ? 1 : 0);
+  console.log(
+    JSON.stringify({ profileDir, bundles: bundles.length, plugins: all, problems, fatal }, null, 2),
+  );
+  process.exit(problems.length > 0 || fatal.length > 0 ? 1 : 0);
 }
 
 // ── 报告 ───────────────────────────────────────────────────────────
@@ -167,9 +252,27 @@ for (const r of all) {
 }
 
 console.log('');
+if (fatal.length > 0) {
+  console.log(`发现 ${String(fatal.length)} 个致命项 —— 这些会让 DSH 直接打不开：`);
+  console.log('');
+  for (const f of fatal) {
+    console.log(`· ${f.what}`);
+    console.log(`  文件：${f.path}`);
+  }
+  console.log('');
+  console.log('这一层与 bundle 层不同：bundle 解析失败只会被跳过，而 profile 清单');
+  console.log('与用户 patch 层出错是裸抛异常，会直接终止启动。');
+  console.log('修复：用备份覆盖回去，例如同目录下的 cordis.patch.yml.bak-* 。');
+  console.log('');
+}
+
 if (problems.length === 0) {
-  console.log(`全部 ${String(locals.length)} 个本地插件装载正常。`);
-  process.exit(0);
+  console.log(
+    fatal.length === 0
+      ? `全部 ${String(locals.length)} 个本地插件装载正常。`
+      : `插件装载无异常，但有 ${String(fatal.length)} 个致命项（见上）。`,
+  );
+  process.exit(fatal.length > 0 ? 1 : 0);
 }
 
 console.log(`发现 ${String(problems.length)} 个问题插件：`);
