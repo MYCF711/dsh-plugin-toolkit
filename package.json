@@ -1,0 +1,31 @@
+{
+  "name": "dsh-plugin-toolkit",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Diagnose and repair DSH plugin loading: self-contained installs, three-way install reconciliation, and silent-death detection.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "toolkit",
+    "diagnostics"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "verify": "node scripts/verify-toolkit.mjs",
+    "install:local": "node scripts/install-selfcontained.mjs",
+    "diagnose": "node scripts/diagnose-install.mjs",
+    "lint": "node scripts/lint-profile.mjs"
+  },
+  "files": [
+    "scripts",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ]
+}
